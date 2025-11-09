@@ -81,42 +81,7 @@ def test_get_dog_ids():
     print(f"Total duration: {(end - start):.2f}s")
     print(f"Page scraping duration (avg, upper estim): {20 * ((end - start) / len(ids)):.3f}\n") # keep >0.5s, use time.sleep() if necessary
 
-def scrape_dog(id):
-    """
-    Scrapes the data of a dog given its ID.
-    
-    Each dog's page can be accessed by:
-    dogsindanger.com/dog/<ID>
-    """
-    url = f"dogsindanger.com/dog/{id}"
-    response = requests.get(url)
-
-    # Ensure Page Exists (CRITICAL ERROR IF FAILS)
-    try: 
-        response.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        print(f"HTTP ERROR: {e}")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"NON-HTTP ERROR (e.g network issue): {e}")
-        return None
-    
-    soup = BeautifulSoup(response.text, 'html.parser')
-    container = soup.find('div', attrs={'class': 'purplebox'})
-    img_url = container.find('img', attrs={'id': 'mainImageX'})['src']
-
-    # Discuss good ways to target an get elements
-    # Consider getting all the text inside container and processing that
-    # Using the elements right after <strong> might also work (this is what was used last time)
-
-
-def scrape():
-    """
-    Master function that needs to be called in 
-    """
-    pass
-
-if __name__ == '__main__':
+def test_db_read():
     test_pet = (
         supabase.table('pets')
         .select('*')
@@ -134,3 +99,109 @@ if __name__ == '__main__':
     )
 
     print(test_shelter)
+
+def scrape_dog(id):
+    """
+    Scrapes the data of a dog given its ID.
+    
+    Each dog's page can be accessed by:
+    dogsindanger.com/dog/<ID>
+    """
+    url = f"https://www.dogsindanger.com/dog/{id}"
+    response = requests.get(url)
+
+    # Ensure Page Exists (CRITICAL ERROR IF FAILS)
+    try: 
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP ERROR: {e}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"NON-HTTP ERROR (e.g network issue): {e}")
+        return None
+    
+    soup = BeautifulSoup(response.text, 'lxml')
+    container = soup.find('div', attrs={'id': 'doggie'})
+
+    dog = {} # all dog data goes here
+    shelter = {} # all shelter data goes here
+
+    # Dog image (only one)
+    dog['img_url'] = container.find('img', attrs={'id': 'mainImageX'})['src']
+
+    # Dog descriptions (using text didn't work consistently)
+    description_div = container.find('div', attrs={'style': 'font-size:1.2em'})
+    dog['description'] = description_div.find(string=True, recursive=False).strip().lstrip(': ')
+
+    # Euthanasia date + reason
+    euthanasia_div = container.find('div', attrs={'style': 'font-size:10pt;'})
+    strip_strs = [l for l in euthanasia_div.stripped_strings]
+    dog['euthanasia_date'] = strip_strs[-2][-12:] # ALT: euthanasia_div.find('span').get_text(strip=True)[-12:]
+    dog['euthanasia_reason'] = strip_strs[-1][8:]
+    
+    # Finding data in raw text
+    text = container.get_text(strip=True, separator="\n")
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        if lines[i] == 'Breed:':
+            dog['breed'] = lines[i+1]
+            i += 2
+            continue
+        
+        if lines[i] == 'Age:':
+            dog['age'] = lines[i+1]
+            i += 2
+            continue
+        
+        if lines[i] == 'Gender:':
+            dog['gender'] = lines[i+1]
+            i += 2
+            continue
+        
+        if lines[i] == 'Size:':
+            dog['size'] = lines[i+1]
+            i += 2
+            continue
+        
+        if lines[i] == 'Shelter Information:':
+            shelter['name'] = lines[i+1]
+            shelter['address'] = lines[i+2]
+            shelter['city'] = lines[i+3][:-4]
+            shelter['state'] = lines[i+3][-2:]
+            i += 4
+            continue
+        
+        if lines[i] == 'Shelter dog ID:':
+            dog['shelter_given_id'] = lines[i+1]
+            i += 2
+            continue
+        
+        if lines[i] == 'Contact:':
+            shelter['phone'] = lines[i+2]
+            shelter['email'] = lines[i+6]
+            i += 7
+            continue
+        
+        i += 1 # general increment
+    
+    return dog, shelter # complete
+
+def test_scrape_dog():
+    # 1758257073360 - Nacie 
+    # 1761092968039 - Peabody
+    dog, shelter = scrape_dog(1758257073360) 
+
+    print(f"\nDog: {dog}\n")
+    print(f"Shelter: {shelter}\n")
+
+def scrape():
+    """
+    Master function that needs to be called in 
+    """
+    pass
+
+if __name__ == '__main__':
+    test_scrape_dog()
