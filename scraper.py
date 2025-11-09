@@ -91,6 +91,25 @@ def scrape_dog(id):
     url = f"dogsindanger.com/dog/{id}"
     response = requests.get(url)
 
+    # Ensure Page Exists (CRITICAL ERROR IF FAILS)
+    try: 
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP ERROR: {e}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"NON-HTTP ERROR (e.g network issue): {e}")
+        return None
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    container = soup.find('div', attrs={'class': 'purplebox'})
+    img_url = container.find('img', attrs={'id': 'mainImageX'})['src']
+
+    # Discuss good ways to target an get elements
+    # Consider getting all the text inside container and processing that
+    # Using the elements right after <strong> might also work (this is what was used last time)
+
+
 def scrape():
     """
     Master function that needs to be called in 
