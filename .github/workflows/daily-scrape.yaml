@@ -8,7 +8,7 @@ on:
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
-    environment: MAHASVIN_ENV
+    environment: MAHASVIN_SECRETS
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
