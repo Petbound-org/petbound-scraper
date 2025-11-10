@@ -2,7 +2,7 @@ name: daily-scrape
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # midnight pacific time
+    - cron: "0 8 * * *"   # might pacific time
   workflow_dispatch:
 
 jobs:
@@ -11,17 +11,16 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-      
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: Install deps
-        run: pip3 install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       - name: Run scraper
-        run: python3 scraper.py
+        run: python scraper.py
