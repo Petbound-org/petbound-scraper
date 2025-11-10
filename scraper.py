@@ -262,9 +262,10 @@ def update_csv():
 
 def scrape_to_db():
     # Database Connection (made for github actions)
+    #load_dotenv() -- use if running manually
     supabase: Client = create_client(
-        os.environ['SUPABASE_URL'],
-        os.environ['SUPABASE_KEY']
+        os.environ.get("SUPABASE_URL"),
+        os.environ.get("SUPABASE_KEY")
     )
 
     # Scrape all ids
