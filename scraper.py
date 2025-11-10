@@ -261,14 +261,13 @@ def update_csv():
 """
 
 def scrape_to_db():
-    print(f"SUPABASE_URL: {os.environ.get('SUPABASE_URL')}")
-    print(f"SUPABASE_KEY: {os.environ.get('SUPABASE_KEY')}")
     # Database Connection (made for github actions)
-    load_dotenv() 
-    supabase: Client = create_client(
-        os.environ.get("SUPABASE_URL"),
-        os.environ.get("SUPABASE_KEY")
-    )
+    load_dotenv()  # load variables from .env first
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        raise ValueError(f"Supabase credentials missing! URL={supabase_url}, KEY={'set' if supabase_key else 'missing'}")
+    supabase: Client = create_client(supabase_url, supabase_key)
 
     # Scrape all ids
     dog_ids = scrape_dog_ids()
