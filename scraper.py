@@ -264,7 +264,7 @@ def scrape_to_db():
     print(f"SUPABASE_URL: {os.environ.get('SUPABASE_URL')}")
     print(f"SUPABASE_KEY: {os.environ.get('SUPABASE_KEY')}")
     # Database Connection (made for github actions)
-    #load_dotenv() -- use if running manually
+    load_dotenv() 
     supabase: Client = create_client(
         os.environ.get("SUPABASE_URL"),
         os.environ.get("SUPABASE_KEY")
