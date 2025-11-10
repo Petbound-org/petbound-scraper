@@ -12,14 +12,24 @@ from selenium.webdriver.common.by import By
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# Database Connection
-load_dotenv()
-supabase: Client = create_client(
-    os.environ['SUPABASE_URL'],
-    os.environ['SUPABASE_KEY']
-)
+# Constants --- these are for CSV
+PET_CSV = "pet_data.csv"
+SHELTER_CSV = "shelter_data.csv"
+PET_HEADER = [
+    'name', 'breed', 'age', 'gender', 'size', 
+    'description', 'euthanasia_date', 'image_urls', 
+    'shelter_given_id', 'euthanasia_reason'
+]
+SHELTER_HEADER = [
+    'name', 'address', 'city', 'state', 
+    'phone_number', 'email'
+]
 
-def get_dog_ids():
+"""
+-----  Scrape Methods  -----
+"""
+
+def scrape_dog_ids():
     """
     Getting all dog_ids on the dogsindanger website.
     Scraper en
@@ -71,35 +81,6 @@ def get_dog_ids():
 
     return dogs_ids
 
-def test_get_dog_ids():
-    start = time.time()
-    ids = get_dog_ids()
-    end = time.time()
-
-    print(f"\nScraped {len(ids)} dogs")
-    print(f"All ids are unique: {len(set(ids)) == len(ids)}")
-    print(f"Total duration: {(end - start):.2f}s")
-    print(f"Page scraping duration (avg, upper estim): {20 * ((end - start) / len(ids)):.3f}\n") # keep >0.5s, use time.sleep() if necessary
-
-def test_db_read():
-    test_pet = (
-        supabase.table('pets')
-        .select('*')
-        .eq('id', 1)
-        .execute()
-        .data
-    )
-
-    test_shelter = (
-        supabase.table('shelters')
-        .select('*')
-        .eq('id', 1)
-        .execute()
-        .data
-    )
-
-    print(test_shelter)
-
 def scrape_dog(id):
     """
     Scrapes the data of a dog given its ID.
@@ -126,8 +107,12 @@ def scrape_dog(id):
     dog = {} # all dog data goes here
     shelter = {} # all shelter data goes here
 
+    # Dog name
+    name_div = container.find('div', attrs={'style': 'font-size:24pt;text-transform:capitalize;line-height:1.0;margin-bottom:7px;'})
+    dog['name'] = name_div.get_text(strip=True).title()
+
     # Dog image (only one)
-    dog['img_url'] = container.find('img', attrs={'id': 'mainImageX'})['src']
+    dog['image_urls'] = [container.find('img', attrs={'id': 'mainImageX'})['src']]
 
     # Dog descriptions (using text didn't work consistently)
     description_div = container.find('div', attrs={'style': 'font-size:1.2em'})
@@ -180,7 +165,7 @@ def scrape_dog(id):
             continue
         
         if lines[i] == 'Contact:':
-            shelter['phone'] = lines[i+2]
+            shelter['phone_number'] = lines[i+2]
             shelter['email'] = lines[i+6]
             i += 7
             continue
@@ -188,6 +173,39 @@ def scrape_dog(id):
         i += 1 # general increment
     
     return dog, shelter # complete
+
+"""
+-----  Tests  -----
+"""
+
+def test_scrape_dog_ids():
+    start = time.time()
+    ids = scrape_dog_ids()
+    end = time.time()
+
+    print(f"\nScraped {len(ids)} dogs")
+    print(f"All ids are unique: {len(set(ids)) == len(ids)}")
+    print(f"Total duration: {(end - start):.2f}s")
+    print(f"Page scraping duration (avg, upper estim): {20 * ((end - start) / len(ids)):.3f}\n") # keep >0.5s, use time.sleep() if necessary
+
+def test_db_read(supabase: Client):
+    test_pet = (
+        supabase.table('pets')
+        .select('*')
+        .eq('id', 1)
+        .execute()
+        .data
+    )
+
+    test_shelter = (
+        supabase.table('shelters')
+        .select('*')
+        .eq('id', 1)
+        .execute()
+        .data
+    )
+
+    print(test_shelter)
 
 def test_scrape_dog():
     # 1758257073360 - Nacie 
@@ -197,11 +215,114 @@ def test_scrape_dog():
     print(f"\nDog: {dog}\n")
     print(f"Shelter: {shelter}\n")
 
-def scrape():
-    """
-    Master function that needs to be called in 
-    """
+"""
+-----  Database or CSV Data Storage  -----
+"""
+
+def update_db(supabase: Client, dog, shelter):
+    # Check if shelter exists in data
+    response = (
+        supabase.table('shelters')
+        .select('id')
+        .filter('name', 'eq', shelter['name'])
+        .filter('address', 'eq', shelter['address'])
+        .execute()
+        .data
+    )
+
+    # Setting shelter ID or adding shelter then setting ID
+    if response: 
+        dog['shelter_id'] = response[0]['id']
+    else:
+        response = supabase.table('shelters').insert(shelter).execute().data
+        dog['shelter_id'] = response[0]['id']
+
+    # Check if dog exists in DB (matching shelter + shelter given ID)
+    response = (
+        supabase.table('pets')
+        .select('id')
+        .filter('shelter_given_id', 'eq', dog['shelter_given_id'])
+        .filter('shelter_id', 'eq', dog['shelter_id'])
+        .execute()
+        .data
+    )
+
+    # Updating dog data if exists, else creating a new dog
+    if response:
+        supabase.table('pets').update(dog).filter('id', 'eq', response[0]['id']).execute()
+    else:
+        supabase.table('pets').insert(dog).execute()
+
+def update_csv():
     pass
 
+"""
+-----  Main Scraper  -----
+"""
+
+def scrape_to_db():
+    # Database Connection
+    load_dotenv()
+    supabase: Client = create_client(
+        os.environ['SUPABASE_URL'],
+        os.environ['SUPABASE_KEY']
+    )
+
+    # Scrape all ids
+    dog_ids = scrape_dog_ids()
+
+    # Scrape and update dogs
+    counter = 0
+    for id in dog_ids:
+        dog, shelter = scrape_dog(id)
+        update_db(supabase, dog, shelter)
+        
+        counter += 1 
+
+        if counter % 20 == 0:
+            print(f"Scraped {counter} pets so far.")
+    
+    print(f"Scraped {counter} pets total.")
+
+"""
+-----  Execution / Test  -----
+"""
+
 if __name__ == '__main__':
-    test_scrape_dog()
+    start = time.time()
+    scrape_to_db()
+    end = time.time()
+    print("\nScraping Complete!")
+    print(f"Duration: {(end - start) / 60:.0f} minutes.\n")
+
+"""
+Gave up on this method because it seems useless.
+
+Downloading data from DB is probably better.
+
+def scrape_to_csv(write_to):
+    # Database Connection
+    load_dotenv()
+    supabase: Client = create_client(
+        os.environ['SUPABASE_URL'],
+        os.environ['SUPABASE_KEY']
+    )
+    
+    # Scrape all ids
+    dog_ids = scrape_dog_ids()
+
+    # Write header to csv
+    with open(PET_CSV, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(PET_HEADER)
+    with open(SHELTER_CSV, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(SHELTER_HEADER)
+
+    # Scrape and update dogs
+    for id in dog_ids:
+        dog, shelter = scrape_dog(id)
+        
+        # append to CSV (organize obj by _HEADER)
+
+"""
