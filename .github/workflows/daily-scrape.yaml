@@ -1,0 +1,27 @@
+name: daily-scrape
+
+on:
+  schedule:
+    - cron: "0 8 * * *"   # midnight pacific time
+  workflow_dispatch:
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip3 install -r requirements.txt
+
+      - name: Run scraper
+        run: python3 scraper.py
