@@ -262,7 +262,6 @@ def update_csv():
 
 def scrape_to_db():
     # Database Connection
-    load_dotenv()
     supabase: Client = create_client(
         os.environ['SUPABASE_URL'],
         os.environ['SUPABASE_KEY']
