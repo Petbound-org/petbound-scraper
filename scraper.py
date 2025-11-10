@@ -265,8 +265,13 @@ def scrape_to_db():
     load_dotenv()  # load variables from .env first
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_KEY")
-    if not supabase_url or not supabase_key:
-        raise ValueError(f"Supabase credentials missing! URL={supabase_url}, KEY={'set' if supabase_key else 'missing'}")
+    
+    if not os.environ.get('SUPABASE_URL'):
+        raise EnvironmentError("SUPABASE_URL environment variable not set. Please check your GitHub Actions secrets.")
+
+    if not os.environ.get('SUPABASE_KEY'):
+        raise EnvironmentError("SUPABASE_KEY environment variable not set. Please check your GitHub Actions secrets.")
+
     supabase: Client = create_client(supabase_url, supabase_key)
 
     # Scrape all ids
