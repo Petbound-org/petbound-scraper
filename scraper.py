@@ -300,35 +300,3 @@ if __name__ == '__main__':
     end = time.time()
     print("\nScraping Complete!")
     print(f"Duration: {(end - start) / 60:.0f} minutes.\n")
-
-"""
-Gave up on this method because it seems useless.
-
-Downloading data from DB is probably better.
-
-def scrape_to_csv(write_to):
-    # Database Connection
-    load_dotenv()
-    supabase: Client = create_client(
-        os.environ['SUPABASE_URL'],
-        os.environ['SUPABASE_KEY']
-    )
-    
-    # Scrape all ids
-    dog_ids = scrape_dog_ids()
-
-    # Write header to csv
-    with open(PET_CSV, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(PET_HEADER)
-    with open(SHELTER_CSV, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(SHELTER_HEADER)
-
-    # Scrape and update dogs
-    for id in dog_ids:
-        dog, shelter = scrape_dog(id)
-        
-        # append to CSV (organize obj by _HEADER)
-
-"""
