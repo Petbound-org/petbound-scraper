@@ -4,7 +4,6 @@
 import os
 import requests
 import time
-import csv
 import re # regular expressions
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -49,8 +48,8 @@ def scrape_dog_ids():
         while True:
             # Fetching a response
             url = BASE.format(start_index=start_index, state=state)
-            response = requests.get(url)
             # time.sleep(0.5) # *** UNCOMMENT AS A POSSIBLE FIX FOR UNEXPECTED ERRORS ***
+            response = requests.get(url)
             
             # Ensure Page Exists (CRITICAL ERROR IF FAILS)
             try: 
@@ -116,12 +115,15 @@ def scrape_dog(id):
 
     # Dog descriptions (using text didn't work consistently)
     description_div = container.find('div', attrs={'style': 'font-size:1.2em'})
-    dog['description'] = description_div.find(string=True, recursive=False).strip().lstrip(': ')
+    if description_div:
+        dog['description'] = description_div.find(string=True, recursive=False).strip().lstrip(': ')
+    else:
+        dog['description'] = ""
 
     # Euthanasia date + reason
     euthanasia_div = container.find('div', attrs={'style': 'font-size:10pt;'})
     strip_strs = [l for l in euthanasia_div.stripped_strings]
-    dog['euthanasia_date'] = strip_strs[-2][-12:] # ALT: euthanasia_div.find('span').get_text(strip=True)[-12:]
+    dog['euthanasia_date'] = euthanasia_div.find('span').get_text(strip=True)[-12:] # ALT: strip_strs[-2][-12:] 
     dog['euthanasia_reason'] = strip_strs[-1][8:]
     
     # Finding data in raw text
@@ -274,12 +276,19 @@ def scrape_to_db():
 
     supabase: Client = create_client(supabase_url, supabase_key)
 
+    print("Scraping all dog ids...")
+
     # Scrape all ids
     dog_ids = scrape_dog_ids()
+
+    print("Dog ID scraping complete ✅")
+
+    print("Scraping each dog's data and updating db...")
 
     # Scrape and update dogs
     counter = 0
     for id in dog_ids:
+        print(f"Dog id: {id}")
         dog, shelter = scrape_dog(id)
         update_db(supabase, dog, shelter)
         
@@ -288,7 +297,7 @@ def scrape_to_db():
         if counter % 20 == 0:
             print(f"Scraped {counter} pets so far.")
     
-    print(f"Scraped {counter} pets total.")
+    print(f"\nScraped {counter} pets total.\n")
 
 """
 -----  Execution / Test  -----
