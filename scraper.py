@@ -10,7 +10,22 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+# Setting up a requests session with retries
+# This makes it so it doesent all fail on occasional errors
+SESSION = requests.Session()
+retries = Retry(
+    total=5,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=retries))
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (PetBound scraper; GitHub Actions)",
+}
 # Constants --- these are for CSV
 PET_CSV = "pet_data.csv"
 SHELTER_CSV = "shelter_data.csv"
@@ -83,99 +98,143 @@ def scrape_dog_ids():
 def scrape_dog(id):
     """
     Scrapes the data of a dog given its ID.
-    
-    Each dog's page can be accessed by:
-    dogsindanger.com/dog/<ID>
+    Each dog's page: https://www.dogsindanger.com/dog/<ID>
     """
     url = f"https://www.dogsindanger.com/dog/{id}"
-    response = requests.get(url)
 
-    # Ensure Page Exists (CRITICAL ERROR IF FAILS)
-    try: 
+    # USE SESSION + headers + timeout (so retries apply)
+    try:
+        response = SESSION.get(url, headers=HEADERS, timeout=20)
         response.raise_for_status()
     except requests.exceptions.HTTPError as e:
-        print(f"HTTP ERROR: {e}")
+        print(f"[HTTP ERROR] dog_id={id} url={url} -> {e}")
         return None
     except requests.exceptions.RequestException as e:
-        print(f"NON-HTTP ERROR (e.g network issue): {e}")
+        print(f"[NETWORK ERROR] dog_id={id} url={url} -> {e}")
         return None
-    
+
     soup = BeautifulSoup(response.text, 'lxml')
     container = soup.find('div', attrs={'id': 'doggie'})
 
-    dog = {} # all dog data goes here
-    shelter = {} # all shelter data goes here
+    # If the page structure is not what we expect, skip
+    if not container:
+        print(f"[PARSE ERROR] dog_id={id} url={url} -> missing #doggie container")
+        return None
+
+    dog = {}
+    shelter = {}
 
     # Dog name
     name_div = container.find('div', attrs={'style': 'font-size:24pt;text-transform:capitalize;line-height:1.0;margin-bottom:7px;'})
-    dog['name'] = name_div.get_text(strip=True).title()
+    dog['name'] = name_div.get_text(strip=True).title() if name_div else ""
 
-    # Dog image (only one)
-    dog['image_urls'] = [container.find('img', attrs={'id': 'mainImageX'})['src']]
+    # Dog image
+    img = container.find('img', attrs={'id': 'mainImageX'})
+    dog['image_urls'] = [img.get('src')] if (img and img.get('src')) else []
 
-    # Dog descriptions (using text didn't work consistently)
+    # Dog description
     description_div = container.find('div', attrs={'style': 'font-size:1.2em'})
     if description_div:
-        dog['description'] = description_div.find(string=True, recursive=False).strip().lstrip(': ')
+        raw_desc = description_div.find(string=True, recursive=False)
+        dog['description'] = raw_desc.strip().lstrip(': ') if raw_desc else ""
     else:
         dog['description'] = ""
 
-    # Euthanasia date + reason
+    # Euthanasia date + reason (defensive)
+    dog['euthanasia_date'] = ""
+    dog['euthanasia_reason'] = ""
     euthanasia_div = container.find('div', attrs={'style': 'font-size:10pt;'})
-    strip_strs = [l for l in euthanasia_div.stripped_strings]
-    dog['euthanasia_date'] = euthanasia_div.find('span').get_text(strip=True)[-12:] # ALT: strip_strs[-2][-12:] 
-    dog['euthanasia_reason'] = strip_strs[-1][8:]
-    
-    # Finding data in raw text
+    if euthanasia_div:
+        strip_strs = [l for l in euthanasia_div.stripped_strings]
+
+        # date: try span last 12 chars, else fallback to list parsing
+        span = euthanasia_div.find('span')
+        if span:
+            dog['euthanasia_date'] = span.get_text(strip=True)[-12:]
+        elif len(strip_strs) >= 2:
+            dog['euthanasia_date'] = strip_strs[-2][-12:]
+
+        # reason: best effort
+        if strip_strs:
+            last = strip_strs[-1]
+            dog['euthanasia_reason'] = last[8:] if len(last) > 8 else last
+
+    # Raw text parsing
     text = container.get_text(strip=True, separator="\n")
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     i = 0
     n = len(lines)
 
+    email_re = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+    phone_re = re.compile(r"(\+?1[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}")
+
     while i < n:
-        if lines[i] == 'Breed:':
-            dog['breed'] = lines[i+1]
-            i += 2
-            continue
-        
-        if lines[i] == 'Age:':
-            dog['age'] = lines[i+1]
-            i += 2
-            continue
-        
-        if lines[i] == 'Gender:':
-            dog['gender'] = lines[i+1]
-            i += 2
-            continue
-        
-        if lines[i] == 'Size:':
-            dog['size'] = lines[i+1]
-            i += 2
-            continue
-        
-        if lines[i] == 'Shelter Information:':
+        if lines[i] == 'Breed:' and i+1 < n:
+            dog['breed'] = lines[i+1]; i += 2; continue
+
+        if lines[i] == 'Age:' and i+1 < n:
+            dog['age'] = lines[i+1]; i += 2; continue
+
+        if lines[i] == 'Gender:' and i+1 < n:
+            dog['gender'] = lines[i+1]; i += 2; continue
+
+        if lines[i] == 'Size:' and i+1 < n:
+            dog['size'] = lines[i+1]; i += 2; continue
+
+        if lines[i] == 'Shelter Information:' and i+3 < n:
             shelter['name'] = lines[i+1]
             shelter['address'] = lines[i+2]
-            shelter['city'] = lines[i+3][:-4]
-            shelter['state'] = lines[i+3][-2:]
+
+            city_state = lines[i+3]
+            # defensive parse
+            if len(city_state) >= 2:
+                shelter['state'] = city_state[-2:]
+                shelter['city'] = city_state[:-4] if len(city_state) > 4 else ""
+            else:
+                shelter['city'] = ""
+                shelter['state'] = ""
+
             i += 4
             continue
-        
-        if lines[i] == 'Shelter dog ID:':
+
+        if lines[i] == 'Shelter dog ID:' and i+1 < n:
             dog['shelter_given_id'] = lines[i+1]
             i += 2
             continue
-        
-        if lines[i] == 'Contact:':
-            shelter['phone_number'] = lines[i+2]
-            shelter['email'] = lines[i+6]
-            i += 7
-            continue
-        
-        i += 1 # general increment
-    
-    return dog, shelter # complete
 
+        # NEW: no fixed offsets — scan forward for phone/email
+        if lines[i] == 'Contact:':
+            found_phone = ""
+            found_email = ""
+            j = i
+
+            while j < n and (not found_phone or not found_email):
+                if not found_email:
+                    m = email_re.search(lines[j])
+                    if m:
+                        found_email = m.group(0)
+
+                if not found_phone:
+                    m = phone_re.search(lines[j])
+                    if m:
+                        found_phone = m.group(0)
+
+                j += 1
+
+            shelter['phone_number'] = found_phone
+            shelter['email'] = found_email
+            i = j
+            continue
+
+        i += 1
+
+    # Ensure keys exist (prevents KeyError later)
+    for k in ['breed', 'age', 'gender', 'size', 'shelter_given_id']:
+        dog.setdefault(k, "")
+    for k in ['name', 'address', 'city', 'state', 'phone_number', 'email']:
+        shelter.setdefault(k, "")
+
+    return dog, shelter
 """
 -----  Tests  -----
 """
@@ -264,40 +323,61 @@ def update_csv():
 
 def scrape_to_db():
     # Database Connection (made for github actions)
-    load_dotenv()  # load variables from .env first
+    load_dotenv()
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_KEY")
-    
-    if not os.environ.get('SUPABASE_URL'):
-        raise EnvironmentError("SUPABASE_URL environment variable not set. Please check your GitHub Actions secrets.")
 
-    if not os.environ.get('SUPABASE_KEY'):
+    if not supabase_url:
+        raise EnvironmentError("SUPABASE_URL environment variable not set. Please check your GitHub Actions secrets.")
+    if not supabase_key:
         raise EnvironmentError("SUPABASE_KEY environment variable not set. Please check your GitHub Actions secrets.")
 
     supabase: Client = create_client(supabase_url, supabase_key)
 
     print("Scraping all dog ids...")
-
-    # Scrape all ids
     dog_ids = scrape_dog_ids()
 
-    print("Dog ID scraping complete ✅")
+    if not dog_ids:
+        raise RuntimeError("scrape_dog_ids() failed or returned no ids.")
 
+    print("Dog ID scraping complete ✅")
     print("Scraping each dog's data and updating db...")
 
-    # Scrape and update dogs
     counter = 0
+    skipped = 0
+
     for id in dog_ids:
         print(f"Dog id: {id}")
-        dog, shelter = scrape_dog(id)
-        update_db(supabase, dog, shelter)
-        
-        counter += 1 
 
-        if counter % 20 == 0:
-            print(f"Scraped {counter} pets so far.")
-    
-    print(f"\nScraped {counter} pets total.\n")
+        try:
+            result = scrape_dog(id)
+            if result is None:
+                skipped += 1
+                print(f"[SKIP] scrape_dog failed for id={id}")
+                continue
+
+            dog, shelter = result
+
+            if not dog.get("shelter_given_id"):
+                skipped += 1
+                print(f"[SKIP] missing shelter_given_id for id={id}")
+                continue
+
+            update_db(supabase, dog, shelter)
+            counter += 1
+
+            if counter % 20 == 0:
+                print(f"Scraped {counter} pets so far. (skipped={skipped})")
+
+        except Exception as e:
+            skipped += 1
+            print(f"[SKIP] id={id} crashed: {type(e).__name__}: {e}")
+            continue
+
+    print(f"\nScraped {counter} pets total. Skipped {skipped}.\n")
+
+
+
 
 """
 -----  Execution / Test  -----
