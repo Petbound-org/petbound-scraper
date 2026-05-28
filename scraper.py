@@ -12,6 +12,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
 # Setting up a requests session with retries
 # This makes it so it doesent all fail on occasional errors
 SESSION = requests.Session()
@@ -26,6 +27,7 @@ SESSION.mount("https://", HTTPAdapter(max_retries=retries))
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (PetBound scraper; GitHub Actions)",
 }
+
 # Constants --- these are for CSV
 PET_CSV = "pet_data.csv"
 SHELTER_CSV = "shelter_data.csv"
@@ -76,17 +78,22 @@ def scrape_dog_ids():
                 print(f"NON-HTTP ERROR (e.g network issue): {e}")
                 return None
 
+            no_dogs_msg = "There are no dogs matching your search criteria." in response.text
+
             # END condition, start_index is too high, scraping for state complete
-            if "There are no dogs matching your search criteria." in response.text:
+            if no_dogs_msg:
                 break # the break here is used responsibly (I hope)
             
             # HTML parsing
             soup = BeautifulSoup(response.text, 'html.parser')
-            dog_divs = soup.find_all('div', attrs={'style': 'border-radius:5px;border:2px solid #999;background-color:white;box-shadow:0px 0px 10px #888;position:relative;margin-bottom:9px;'})
-            for div in dog_divs:
-                href_val = div.find_all('a')[0]['href']
-                id = re.search(r'/dog/(\d+)-', href_val).group(1) # may have AttributeError if link is unexpected, theoretically should not happen
-                dogs_ids.append(id)
+            regex_ids = []
+            for a in soup.find_all('a', href=True):
+                m = re.search(r'/dog/(\d+)-', a['href'])
+                if m:
+                    regex_ids.append(m.group(1))
+            # Old style-based card matching no longer works on the site.
+            # Collect IDs from all matching dog links on the page.
+            dogs_ids.extend(sorted(set(regex_ids)))
 
             # Increment
             start_index += 20
@@ -235,6 +242,7 @@ def scrape_dog(id):
         shelter.setdefault(k, "")
 
     return dog, shelter
+
 """
 -----  Tests  -----
 """
@@ -375,8 +383,6 @@ def scrape_to_db():
             continue
 
     print(f"\nScraped {counter} pets total. Skipped {skipped}.\n")
-
-
 
 
 """
