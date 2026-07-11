@@ -147,24 +147,24 @@ def scrape_dog(id):
     else:
         dog['description'] = ""
 
-    # Euthanasia date + reason (defensive)
+    # Euthanasia date + reason (defensive, label-based)
+    # The div reads: "At Risk To Be Killed: [TODAY! ]<date> Reason: <reason>"
     dog['euthanasia_date'] = ""
     dog['euthanasia_reason'] = ""
     euthanasia_div = container.find('div', attrs={'style': 'font-size:10pt;'})
     if euthanasia_div:
-        strip_strs = [l for l in euthanasia_div.stripped_strings]
+        full = euthanasia_div.get_text(" ", strip=True)
 
-        # date: try span last 12 chars, else fallback to list parsing
-        span = euthanasia_div.find('span')
-        if span:
-            dog['euthanasia_date'] = span.get_text(strip=True)[-12:]
-        elif len(strip_strs) >= 2:
-            dog['euthanasia_date'] = strip_strs[-2][-12:]
+        # reason: everything after "Reason:"; strip it off before parsing date
+        reason_m = re.search(r'Reason:\s*(.*)$', full)
+        if reason_m:
+            dog['euthanasia_reason'] = reason_m.group(1).strip()
+            full = full[:reason_m.start()]
 
-        # reason: best effort
-        if strip_strs:
-            last = strip_strs[-1]
-            dog['euthanasia_reason'] = last[8:] if len(last) > 8 else last
+        # date: what's left after removing the label and optional "TODAY!"
+        full = re.sub(r'^\s*At Risk To Be Killed:\s*', '', full)
+        full = re.sub(r'^\s*TODAY!\s*', '', full)
+        dog['euthanasia_date'] = full.strip()
 
     # Raw text parsing
     text = container.get_text(strip=True, separator="\n")
@@ -204,7 +204,8 @@ def scrape_dog(id):
             i += 4
             continue
 
-        if lines[i] == 'Shelter dog ID:' and i+1 < n:
+        # Site renamed this label from 'Shelter dog ID:' to 'Dog ID:'.
+        if lines[i] in ('Dog ID:', 'Shelter dog ID:') and i+1 < n:
             dog['shelter_given_id'] = lines[i+1]
             i += 2
             continue
