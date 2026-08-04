@@ -42,6 +42,82 @@ SHELTER_HEADER = [
 ]
 
 """
+-----  Field normalization  -----
+
+The dog page moved age / size / gender out of individual "Age:" / "Size:" /
+"Gender:" labels and into a single free-text "Profile:" block, e.g.
+
+    <div><strong>Profile:</strong>  Medium  size young adult
+    male
+    </div>
+
+so the old label-based parser matched nothing and stored empty strings. These
+maps normalize the "Profile:" values to the buckets the web app filters on.
+"""
+
+SIZE_MAP = {
+    "small": "Small",
+    "medium": "Medium",
+    "large": "Large",
+    "x-large": "X-Large",
+    "xlarge": "X-Large",
+    "extra large": "X-Large",
+}
+
+AGE_MAP = {
+    "under 6 months": "Under 6 months",
+    "young adult": "Young adult",
+    "adult": "Adult",
+    "senior": "Senior",
+}
+
+GENDER_MAP = {
+    "male": "Male",
+    "female": "Female",
+}
+
+
+def _normalize(value, mapping):
+    """Collapse whitespace, lowercase, map to a canonical bucket. Falls back to
+    a title-cased version of the raw value so new/unknown terms aren't lost."""
+    if not value:
+        return ""
+    key = re.sub(r"\s+", " ", value).strip().lower()
+    return mapping.get(key, key.title())
+
+
+def parse_profile(container):
+    """Extract (size, age, gender) from the universal "Profile:" block.
+
+    The block reads "<Size>  size <age category>" on the first line and the
+    gender on the next. Targets the <strong>Profile:</strong> element directly
+    rather than counting text lines, so it survives layout shuffling.
+    """
+    strong = container.find("strong", string=re.compile(r"^\s*Profile:"))
+    if not strong or not strong.parent:
+        return "", "", ""
+
+    text = strong.parent.get_text("\n", strip=True)
+    text = re.sub(r"^\s*Profile:\s*", "", text)
+    parts = [p.strip() for p in text.split("\n") if p.strip()]
+    if not parts:
+        return "", "", ""
+
+    descriptor = parts[0]
+    gender_raw = parts[1] if len(parts) > 1 else ""
+
+    m = re.match(r"(?i)^(.*?)\s+size\s+(.+)$", descriptor)
+    size_raw = m.group(1) if m else ""
+    age_raw = m.group(2) if m else ""
+
+    return (
+        _normalize(size_raw, SIZE_MAP),
+        _normalize(age_raw, AGE_MAP),
+        _normalize(gender_raw, GENDER_MAP),
+    )
+
+
+"""
 -----  Scrape Methods  -----
 """
 
@@ -179,14 +255,8 @@ def scrape_dog(id):
         if lines[i] == 'Breed:' and i+1 < n:
             dog['breed'] = lines[i+1]; i += 2; continue
 
-        if lines[i] == 'Age:' and i+1 < n:
-            dog['age'] = lines[i+1]; i += 2; continue
-
-        if lines[i] == 'Gender:' and i+1 < n:
-            dog['gender'] = lines[i+1]; i += 2; continue
-
-        if lines[i] == 'Size:' and i+1 < n:
-            dog['size'] = lines[i+1]; i += 2; continue
+        # Age / gender / size no longer have their own labels — they live in the
+        # "Profile:" block, parsed separately below via parse_profile().
 
         if lines[i] == 'Shelter Information:' and i+3 < n:
             shelter['name'] = lines[i+1]
@@ -235,6 +305,15 @@ def scrape_dog(id):
             continue
 
         i += 1
+
+    # Age / size / gender come from the free-text "Profile:" block.
+    p_size, p_age, p_gender = parse_profile(container)
+    if p_size:
+        dog['size'] = p_size
+    if p_age:
+        dog['age'] = p_age
+    if p_gender:
+        dog['gender'] = p_gender
 
     # Ensure keys exist (prevents KeyError later)
     for k in ['breed', 'age', 'gender', 'size', 'shelter_given_id']:
