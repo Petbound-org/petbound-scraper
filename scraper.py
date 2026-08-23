@@ -3,6 +3,7 @@
 # imports
 import os
 import requests
+import sys
 import time
 import re # regular expressions
 from bs4 import BeautifulSoup
@@ -40,6 +41,108 @@ SHELTER_HEADER = [
     'name', 'address', 'city', 'state', 
     'phone_number', 'email'
 ]
+
+"""
+-----  Field normalization  -----
+
+The dog page moved age / size / gender out of individual "Age:" / "Size:" /
+"Gender:" labels and into a single free-text "Profile:" block, e.g.
+
+    <div><strong>Profile:</strong>  Medium  size young adult
+    male
+    </div>
+
+so the old label-based parser matched nothing and stored empty strings. These
+maps normalize the "Profile:" values to the buckets the web app filters on.
+"""
+
+SIZE_MAP = {
+    "small": "Small",
+    "medium": "Medium",
+    "large": "Large",
+    "x-large": "X-Large",
+    "xlarge": "X-Large",
+    "extra large": "X-Large",
+}
+
+AGE_MAP = {
+    "under 6 months": "Under 6 months",
+    "young adult": "Young adult",
+    "adult": "Adult",
+    "senior": "Senior",
+}
+
+GENDER_MAP = {
+    "male": "Male",
+    "female": "Female",
+}
+
+
+def _normalize(value, mapping):
+    """Collapse whitespace, lowercase, map to a canonical bucket. Falls back to
+    a title-cased version of the raw value so new/unknown terms aren't lost."""
+    if not value:
+        return ""
+    key = re.sub(r"\s+", " ", value).strip().lower()
+    return mapping.get(key, key.title())
+
+
+def find_by_style(container, pattern, name="div"):
+    """Find the first element whose inline `style` contains `pattern`.
+
+    The site appends properties to these style attributes without warning (the
+    name div gained "display:inline-block;flex-flow: column;" in August 2026),
+    so matching the whole attribute string with attrs={'style': ...} silently
+    stops matching and the field ends up empty. Match a stable fragment instead.
+    """
+    return container.find(name, style=re.compile(pattern))
+
+
+def find_description_div(container):
+    """The description block, distinguished from its look-alike sibling.
+
+    Two divs now carry font-size:1.2em: the breed/profile metadata block and the
+    shelter's free-text write-up. Style alone cannot tell them apart, so pick the
+    one that does not hold the labelled fields.
+    """
+    for div in container.find_all("div", style=re.compile(r"font-size:\s*1\.2em")):
+        labels = {s.get_text(strip=True).rstrip(":") for s in div.find_all("strong")}
+        if labels & {"Breed", "Profile"}:
+            continue
+        return div
+    return None
+
+
+def parse_profile(container):
+    """Extract (size, age, gender) from the universal "Profile:" block.
+
+    The block reads "<Size>  size <age category>" on the first line and the
+    gender on the next. Targets the <strong>Profile:</strong> element directly
+    rather than counting text lines, so it survives layout shuffling.
+    """
+    strong = container.find("strong", string=re.compile(r"^\s*Profile:"))
+    if not strong or not strong.parent:
+        return "", "", ""
+
+    text = strong.parent.get_text("\n", strip=True)
+    text = re.sub(r"^\s*Profile:\s*", "", text)
+    parts = [p.strip() for p in text.split("\n") if p.strip()]
+    if not parts:
+        return "", "", ""
+
+    descriptor = parts[0]
+    gender_raw = parts[1] if len(parts) > 1 else ""
+
+    m = re.match(r"(?i)^(.*?)\s+size\s+(.+)$", descriptor)
+    size_raw = m.group(1) if m else ""
+    age_raw = m.group(2) if m else ""
+
+    return (
+        _normalize(size_raw, SIZE_MAP),
+        _normalize(age_raw, AGE_MAP),
+        _normalize(gender_raw, GENDER_MAP),
+    )
+
 
 """
 -----  Scrape Methods  -----
@@ -132,18 +235,26 @@ def scrape_dog(id):
     shelter = {}
 
     # Dog name
-    name_div = container.find('div', attrs={'style': 'font-size:24pt;text-transform:capitalize;line-height:1.0;margin-bottom:7px;'})
+    name_div = find_by_style(container, r'font-size:\s*24pt')
     dog['name'] = name_div.get_text(strip=True).title() if name_div else ""
 
     # Dog image
     img = container.find('img', attrs={'id': 'mainImageX'})
     dog['image_urls'] = [img.get('src')] if (img and img.get('src')) else []
 
-    # Dog description
-    description_div = container.find('div', attrs={'style': 'font-size:1.2em'})
+    # Dog description. The block is <br>-separated lines, so take every direct
+    # text node rather than only the first: shelters that list one field per
+    # line (microchip, sex, colour, intake date) were being reduced to their
+    # opening line, e.g. 34 characters kept out of 381. Stays non-recursive so
+    # nested markup does not leak in.
+    description_div = find_description_div(container)
     if description_div:
-        raw_desc = description_div.find(string=True, recursive=False)
-        dog['description'] = raw_desc.strip().lstrip(': ') if raw_desc else ""
+        parts = [
+            t.strip()
+            for t in description_div.find_all(string=True, recursive=False)
+            if t.strip()
+        ]
+        dog['description'] = "\n".join(parts).lstrip(': ').strip()
     else:
         dog['description'] = ""
 
@@ -151,7 +262,9 @@ def scrape_dog(id):
     # The div reads: "At Risk To Be Killed: [TODAY! ]<date> Reason: <reason>"
     dog['euthanasia_date'] = ""
     dog['euthanasia_reason'] = ""
-    euthanasia_div = container.find('div', attrs={'style': 'font-size:10pt;'})
+    # Still matching today, but hardened for the same reason as the others: the
+    # whole pipeline is worthless without a date.
+    euthanasia_div = find_by_style(container, r'font-size:\s*10pt')
     if euthanasia_div:
         full = euthanasia_div.get_text(" ", strip=True)
 
@@ -179,14 +292,8 @@ def scrape_dog(id):
         if lines[i] == 'Breed:' and i+1 < n:
             dog['breed'] = lines[i+1]; i += 2; continue
 
-        if lines[i] == 'Age:' and i+1 < n:
-            dog['age'] = lines[i+1]; i += 2; continue
-
-        if lines[i] == 'Gender:' and i+1 < n:
-            dog['gender'] = lines[i+1]; i += 2; continue
-
-        if lines[i] == 'Size:' and i+1 < n:
-            dog['size'] = lines[i+1]; i += 2; continue
+        # Age / gender / size no longer have their own labels — they live in the
+        # "Profile:" block, parsed separately below via parse_profile().
 
         if lines[i] == 'Shelter Information:' and i+3 < n:
             shelter['name'] = lines[i+1]
@@ -235,6 +342,15 @@ def scrape_dog(id):
             continue
 
         i += 1
+
+    # Age / size / gender come from the free-text "Profile:" block.
+    p_size, p_age, p_gender = parse_profile(container)
+    if p_size:
+        dog['size'] = p_size
+    if p_age:
+        dog['age'] = p_age
+    if p_gender:
+        dog['gender'] = p_gender
 
     # Ensure keys exist (prevents KeyError later)
     for k in ['breed', 'age', 'gender', 'size', 'shelter_given_id']:
@@ -327,6 +443,130 @@ def update_csv():
     pass
 
 """
+-----  Post-scrape health check  -----
+
+The scrape itself stays quiet: a dog that fails to parse is skipped and the run
+carries on, so a partial outage still refreshes most of the site rather than
+leaving it stale. The cost of that is silence, and silence is how the August
+2026 breakage went unnoticed for five weeks. dogsindanger.com had appended
+properties to an inline style attribute, the exact-match selectors stopped
+matching, and name / age / gender / size / description were written as empty
+strings on every new record while the run kept reporting success.
+
+So completeness is measured across the whole run and checked once at the end,
+after every record is already saved. If a field is blank far more often than it
+should be, the process exits non-zero. Nothing is rolled back; the only effect is
+a failed GitHub Actions run, which sends the notification email.
+
+Limits are the share of scraped dogs allowed to have a blank value. They sit well
+above normal noise so ordinary gaps stay quiet, and well below a real breakage
+(a broken selector yields ~100%).
+"""
+
+FIELD_BLANK_LIMITS = {
+    "name": 0.20,
+    "breed": 0.05,
+    "age": 0.20,
+    "gender": 0.20,
+    "size": 0.20,
+    # Some shelters genuinely write nothing, so this one runs looser.
+    "description": 0.35,
+    "euthanasia_date": 0.05,
+    "euthanasia_reason": 0.10,
+    "shelter_given_id": 0.05,
+    "image_urls": 0.10,
+}
+
+# Percentages are meaningless on a handful of records, so small runs never fail.
+HEALTH_MIN_SAMPLE = 25
+
+# Dogs that could not be scraped at all. A high rate means the page or the ID
+# search changed shape, which the per-field limits would not necessarily catch.
+SKIP_RATE_LIMIT = 0.25
+
+
+def is_blank(value):
+    """True when a scraped field holds nothing useful.
+
+    Blank fields arrive as empty strings rather than None, because the parsers
+    fall back to "" when a selector misses.
+    """
+    if isinstance(value, list):
+        return not value
+    return not str(value or "").strip()
+
+
+def check_field_health(stats):
+    """Report completeness and return a list of problems, empty when healthy."""
+    scraped = stats["scraped"]
+    skipped = stats["skipped"]
+    blank = stats["blank"]
+    attempted = scraped + skipped
+    problems = []
+
+    lines = ["", "----- Field completeness -----"]
+
+    if scraped < HEALTH_MIN_SAMPLE:
+        lines.append(
+            f"Only {scraped} dogs scraped, below the {HEALTH_MIN_SAMPLE} needed "
+            "to judge completeness. Skipping the check."
+        )
+        print("\n".join(lines))
+        return problems
+
+    for field, limit in FIELD_BLANK_LIMITS.items():
+        count = blank.get(field, 0)
+        rate = count / scraped
+        status = "ok"
+        if rate > limit:
+            status = "FAIL"
+            problems.append(
+                f"{field}: {rate:.0%} blank ({count}/{scraped}), limit {limit:.0%}"
+            )
+        lines.append(
+            f"  {field:<18} {count:>5}/{scraped} blank  {rate:>6.1%}  "
+            f"(limit {limit:.0%})  {status}"
+        )
+
+    if attempted:
+        skip_rate = skipped / attempted
+        status = "ok"
+        if skip_rate > SKIP_RATE_LIMIT:
+            status = "FAIL"
+            problems.append(
+                f"skipped: {skip_rate:.0%} of dogs ({skipped}/{attempted}), "
+                f"limit {SKIP_RATE_LIMIT:.0%}"
+            )
+        lines.append(
+            f"  {'(skipped dogs)':<18} {skipped:>5}/{attempted} failed  "
+            f"{skip_rate:>6.1%}  (limit {SKIP_RATE_LIMIT:.0%})  {status}"
+        )
+
+    if problems:
+        lines.append("")
+        lines.append("The checks below are outside their limits. The usual")
+        lines.append("cause is a changed selector or a renamed label on the")
+        lines.append("source page. Everything scraped is already saved, so")
+        lines.append("this run failed only to raise the alert.")
+        for problem in problems:
+            lines.append(f"  - {problem}")
+
+    report = "\n".join(lines)
+    print(report)
+
+    # Surface the same table on the Actions run page, not only in the log.
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as handle:
+                handle.write(f"```\n{report}\n```\n")
+        except OSError as e:
+            print(f"[WARN] could not write step summary: {e}")
+
+    return problems
+
+
+"""
 -----  Main Scraper  -----
 """
 
@@ -354,6 +594,7 @@ def scrape_to_db():
 
     counter = 0
     skipped = 0
+    blank = {field: 0 for field in FIELD_BLANK_LIMITS}
 
     for id in dog_ids:
         print(f"Dog id: {id}")
@@ -375,6 +616,12 @@ def scrape_to_db():
             update_db(supabase, dog, shelter)
             counter += 1
 
+            # Tally completeness after the write, so the check never gates
+            # saving. A degraded run still refreshes the site.
+            for field in blank:
+                if is_blank(dog.get(field)):
+                    blank[field] += 1
+
             if counter % 20 == 0:
                 print(f"Scraped {counter} pets so far. (skipped={skipped})")
 
@@ -385,6 +632,8 @@ def scrape_to_db():
 
     print(f"\nScraped {counter} pets total. Skipped {skipped}.\n")
 
+    return {"scraped": counter, "skipped": skipped, "blank": blank}
+
 
 """
 -----  Execution / Test  -----
@@ -392,7 +641,14 @@ def scrape_to_db():
 
 if __name__ == '__main__':
     start = time.time()
-    scrape_to_db()
+    stats = scrape_to_db()
     end = time.time()
     print("\nScraping Complete!")
     print(f"Duration: {(end - start) / 60:.0f} minutes.\n")
+
+    # Everything scraped is already in the database. Exiting non-zero here only
+    # fails the Actions run so the notification email goes out.
+    problems = check_field_health(stats)
+    if problems:
+        print(f"\nFailing the run: {len(problems)} field(s) look broken.")
+        sys.exit(1)
