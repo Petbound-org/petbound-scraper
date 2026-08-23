@@ -7,8 +7,6 @@ import sys
 import time
 import re # regular expressions
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.common.by import By
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
