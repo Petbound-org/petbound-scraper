@@ -2,13 +2,17 @@ name: daily-scrape
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # might pacific time
+    - cron: "0 8 * * *"   # UTC, so 00:00 or 01:00 Pacific depending on DST
   workflow_dispatch:
 
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
     environment: MAHASVIN_SECRETS
+    # A normal run finishes in 10 to 17 minutes. A ceiling at roughly triple
+    # that turns a run wedged on retry backoff into a failed run (and an email)
+    # instead of one that quietly burns Actions minutes.
+    timeout-minutes: 45
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
