@@ -12,135 +12,20 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Setting up a requests session with retries
-# This makes it so it doesent all fail on occasional errors
-SESSION = requests.Session()
-retries = Retry(
-    total=5,
-    backoff_factor=1,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["GET"],
-)
-SESSION.mount("https://", HTTPAdapter(max_retries=retries))
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (PetBound scraper; GitHub Actions)",
-}
-
-# Constants --- these are for CSV
+# CSV file locations
 PET_CSV = "pet_data.csv"
 SHELTER_CSV = "shelter_data.csv"
-PET_HEADER = [
+
+# Fields
+PET_FIELDS = [
     'name', 'breed', 'age', 'gender', 'size', 
     'description', 'euthanasia_date', 'image_urls', 
     'shelter_given_id', 'euthanasia_reason'
 ]
-SHELTER_HEADER = [
+SHELTER_FIELDS = [
     'name', 'address', 'city', 'state', 
     'phone_number', 'email'
 ]
-
-"""
------  Field normalization  -----
-
-The dog page moved age / size / gender out of individual "Age:" / "Size:" /
-"Gender:" labels and into a single free-text "Profile:" block, e.g.
-
-    <div><strong>Profile:</strong>  Medium  size young adult
-    male
-    </div>
-
-so the old label-based parser matched nothing and stored empty strings. These
-maps normalize the "Profile:" values to the buckets the web app filters on.
-"""
-
-SIZE_MAP = {
-    "small": "Small",
-    "medium": "Medium",
-    "large": "Large",
-    "x-large": "X-Large",
-    "xlarge": "X-Large",
-    "extra large": "X-Large",
-}
-
-AGE_MAP = {
-    "under 6 months": "Under 6 months",
-    "young adult": "Young adult",
-    "adult": "Adult",
-    "senior": "Senior",
-}
-
-GENDER_MAP = {
-    "male": "Male",
-    "female": "Female",
-}
-
-
-def _normalize(value, mapping):
-    """Collapse whitespace, lowercase, map to a canonical bucket. Falls back to
-    a title-cased version of the raw value so new/unknown terms aren't lost."""
-    if not value:
-        return ""
-    key = re.sub(r"\s+", " ", value).strip().lower()
-    return mapping.get(key, key.title())
-
-
-def find_by_style(container, pattern, name="div"):
-    """Find the first element whose inline `style` contains `pattern`.
-
-    The site appends properties to these style attributes without warning (the
-    name div gained "display:inline-block;flex-flow: column;" in August 2026),
-    so matching the whole attribute string with attrs={'style': ...} silently
-    stops matching and the field ends up empty. Match a stable fragment instead.
-    """
-    return container.find(name, style=re.compile(pattern))
-
-
-def find_description_div(container):
-    """The description block, distinguished from its look-alike sibling.
-
-    Two divs now carry font-size:1.2em: the breed/profile metadata block and the
-    shelter's free-text write-up. Style alone cannot tell them apart, so pick the
-    one that does not hold the labelled fields.
-    """
-    for div in container.find_all("div", style=re.compile(r"font-size:\s*1\.2em")):
-        labels = {s.get_text(strip=True).rstrip(":") for s in div.find_all("strong")}
-        if labels & {"Breed", "Profile"}:
-            continue
-        return div
-    return None
-
-
-def parse_profile(container):
-    """Extract (size, age, gender) from the universal "Profile:" block.
-
-    The block reads "<Size>  size <age category>" on the first line and the
-    gender on the next. Targets the <strong>Profile:</strong> element directly
-    rather than counting text lines, so it survives layout shuffling.
-    """
-    strong = container.find("strong", string=re.compile(r"^\s*Profile:"))
-    if not strong or not strong.parent:
-        return "", "", ""
-
-    text = strong.parent.get_text("\n", strip=True)
-    text = re.sub(r"^\s*Profile:\s*", "", text)
-    parts = [p.strip() for p in text.split("\n") if p.strip()]
-    if not parts:
-        return "", "", ""
-
-    descriptor = parts[0]
-    gender_raw = parts[1] if len(parts) > 1 else ""
-
-    m = re.match(r"(?i)^(.*?)\s+size\s+(.+)$", descriptor)
-    size_raw = m.group(1) if m else ""
-    age_raw = m.group(2) if m else ""
-
-    return (
-        _normalize(size_raw, SIZE_MAP),
-        _normalize(age_raw, AGE_MAP),
-        _normalize(gender_raw, GENDER_MAP),
-    )
-
 
 """
 -----  Scrape Methods  -----
@@ -148,60 +33,54 @@ def parse_profile(container):
 
 def scrape_dog_ids():
     """
-    Getting all dog_ids on the dogsindanger website.
-    Scraper en
+    Getting all dog_ids on the dogsindanger.com website.
 
     Each dog's page can be accessed by:
     dogsindanger.com/dog/<dog_id>
     """
     BASE = "https://www.dogsindanger.com/searchReturn_desktop.jsp?BREED=&t=90&startId={start_index}&zip=&radius=100.0&state={state}&Transport=0"
     states = ['AZ', 'CA', 'FL', 'GA', 'NC', 'OH', 'OK', 'TX']
-    dogs_ids = []
+    dog_ids = set()
 
-    # Repeating for each state
     for state in states:
         start_index = 0
+        prev_size = len(dog_ids)
         
-        # Looping through start_indicies
+        # Loop until page says "There are no dogs matching your search criteria."
         while True:
             # Fetching a response
             url = BASE.format(start_index=start_index, state=state)
-            # time.sleep(0.5) # *** UNCOMMENT AS A POSSIBLE FIX FOR UNEXPECTED ERRORS ***
             response = requests.get(url)
+
+            # time.sleep(0.5) # *** UNCOMMENT AS A POSSIBLE FIX FOR UNEXPECTED ERRORS ***
             
-            # Ensure Page Exists (CRITICAL ERROR IF FAILS)
+            # Connection check (CRITICAL ERROR IF IT FAILS)
             try: 
                 response.raise_for_status()
             except requests.exceptions.HTTPError as e:
                 print(f"HTTP ERROR: {e}")
                 return None
             except requests.exceptions.RequestException as e:
-                print(f"NON-HTTP ERROR (e.g network issue): {e}")
+                print(f"NON-HTTP ERROR (like a network issue): {e}")
                 return None
 
-            no_dogs_msg = "There are no dogs matching your search criteria." in response.text
-
-            # END condition, start_index is too high, scraping for state complete
-            if no_dogs_msg:
+            # No more dogs left for this state (end condition)
+            if "There are no dogs matching your search criteria." in response.text:
                 break # the break here is used responsibly (I hope)
             
-            # HTML parsing
+            # Parse the page for ids
             soup = BeautifulSoup(response.text, 'html.parser')
-            regex_ids = []
             for a in soup.find_all('a', href=True):
-                m = re.search(r'/dog/(\d+)-', a['href'])
-                if m:
-                    regex_ids.append(m.group(1))
-            # Old style-based card matching no longer works on the site.
-            # Collect IDs from all matching dog links on the page.
-            dogs_ids.extend(sorted(set(regex_ids)))
+                id = re.search(r'/dog/(\d+)-', a['href'])
+                if id:
+                    dog_ids.add(int(id.group(1)))
 
-            # Increment
+            # Increment (by 20 b/c it shows 20 dogs a page)
             start_index += 20
     
-        print(f"State complete: {state}")
+        print(f"Completed scraping {state}, found {len(dog_ids) - prev_size} listings.")
 
-    return dogs_ids
+    return sorted(list(dog_ids))
 
 def scrape_dog(id):
     """
@@ -650,3 +529,33 @@ if __name__ == '__main__':
     if problems:
         print(f"\nFailing the run: {len(problems)} field(s) look broken.")
         sys.exit(1)
+
+
+
+
+
+
+
+
+
+
+# SIZE_MAP = {
+#     "small": "Small",
+#     "medium": "Medium",
+#     "large": "Large",
+#     "x-large": "X-Large",
+#     "xlarge": "X-Large",
+#     "extra large": "X-Large",
+# }
+
+# AGE_MAP = {
+#     "under 6 months": "Under 6 months",
+#     "young adult": "Young adult",
+#     "adult": "Adult",
+#     "senior": "Senior",
+# }
+
+# GENDER_MAP = {
+#     "male": "Male",
+#     "female": "Female",
+# }
