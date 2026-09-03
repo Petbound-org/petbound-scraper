@@ -1,32 +1,11 @@
 # scraper.py
 
-import os
-import requests
-import sys
-import time
 import re # regular expressions
+import time
+import requests
 from bs4 import BeautifulSoup
-from supabase import create_client, Client
-from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from schemas import Dog, Shelter
-
-# CSV file locations
-PET_CSV = "pet_data.csv"
-SHELTER_CSV = "shelter_data.csv"
-
-# Fields
-PET_FIELDS = [
-    'name', 'breed', 'age', 'gender', 'size', 
-    'description', 'euthanasia_date', 'image_urls', 
-    'shelter_given_id', 'euthanasia_reason'
-]
-SHELTER_FIELDS = [
-    'name', 'address', 'city', 'state', 
-    'phone_number', 'email'
-]
 
 # Conversion from website text to cleaner versions
 SIZE_TEXT_CONVERSION = {
@@ -60,7 +39,10 @@ def scrape_dog_ids():
     dogsindanger.com/dog/<dog_id>
     """
     BASE = "https://www.dogsindanger.com/searchReturn_desktop.jsp?BREED=&t=90&startId={start_index}&zip=&radius=100.0&state={state}&Transport=0"
-    states = ['AZ', 'CA', 'FL', 'GA', 'NC', 'OH', 'OK', 'TX']
+    states = [
+        'AZ', 'CA', 'FL', 'GA', 'IL', 'KS', 'MD', 'NC',
+        'NM', 'NV', 'NY', 'OH', 'OK', 'PA', 'TX',
+    ]
     dog_ids = set()
 
     for state in states:
@@ -294,25 +276,6 @@ def test_scrape_dog_ids():
     print(f"Total duration: {(end - start):.2f}s")
     print(f"Page scraping duration (avg, upper estim): {20 * ((end - start) / len(ids)):.3f}\n") # keep >0.5s, use time.sleep() if necessary
 
-def test_db_read(supabase: Client):
-    test_pet = (
-        supabase.table('pets')
-        .select('*')
-        .eq('id', 1)
-        .execute()
-        .data
-    )
-
-    test_shelter = (
-        supabase.table('shelters')
-        .select('*')
-        .eq('id', 1)
-        .execute()
-        .data
-    )
-
-    print(test_shelter)
-
 def test_scrape_dog():
     # 1758257073360 - Nacie
     # 1761092968039 - Peabody
@@ -329,243 +292,3 @@ def test_scrape_dog():
         print(f"\n----- {dog_id} -----")
         print(f"Dog: {dog}\n")
         print(f"Shelter: {shelter}\n")
-
-"""
------  Database or CSV Data Storage  -----
-"""
-
-def update_db(supabase: Client, dog, shelter):
-    # Check if shelter exists in data
-    response = (
-        supabase.table('shelters')
-        .select('id')
-        .filter('name', 'eq', shelter['name'])
-        .filter('address', 'eq', shelter['address'])
-        .execute()
-        .data
-    )
-
-    # Setting shelter ID or adding shelter then setting ID
-    if response: 
-        dog['shelter_id'] = response[0]['id']
-    else:
-        response = supabase.table('shelters').insert(shelter).execute().data
-        dog['shelter_id'] = response[0]['id']
-
-    # Check if dog exists in DB (matching shelter + shelter given ID)
-    response = (
-        supabase.table('pets')
-        .select('id')
-        .filter('shelter_given_id', 'eq', dog['shelter_given_id'])
-        .filter('shelter_id', 'eq', dog['shelter_id'])
-        .execute()
-        .data
-    )
-
-    # Updating dog data if exists, else creating a new dog
-    if response:
-        supabase.table('pets').update(dog).filter('id', 'eq', response[0]['id']).execute()
-    else:
-        supabase.table('pets').insert(dog).execute()
-
-"""
------  Post-scrape health check  -----
-"""
-
-FIELD_BLANK_LIMITS = {
-    "name": 0.20,
-    "breed": 0.05,
-    "age": 0.20,
-    "gender": 0.20,
-    "size": 0.20,
-    # Some shelters genuinely write nothing, so this one runs looser.
-    "description": 0.35,
-    "euthanasia_date": 0.05,
-    "euthanasia_reason": 0.10,
-    "shelter_given_id": 0.05,
-    "image_urls": 0.10,
-}
-
-# Percentages are meaningless on a handful of records, so small runs never fail.
-HEALTH_MIN_SAMPLE = 25
-
-# Dogs that could not be scraped at all. A high rate means the page or the ID
-# search changed shape, which the per-field limits would not necessarily catch.
-SKIP_RATE_LIMIT = 0.25
-
-
-def is_blank(value):
-    """True when a scraped field holds nothing useful.
-
-    Blank fields arrive as empty strings rather than None, because the parsers
-    fall back to "" when a selector misses.
-    """
-    if isinstance(value, list):
-        return not value
-    return not str(value or "").strip()
-
-
-def check_field_health(stats):
-    """Report completeness and return a list of problems, empty when healthy."""
-    scraped = stats["scraped"]
-    skipped = stats["skipped"]
-    blank = stats["blank"]
-    attempted = scraped + skipped
-    problems = []
-
-    lines = ["", "----- Field completeness -----"]
-
-    if scraped < HEALTH_MIN_SAMPLE:
-        lines.append(
-            f"Only {scraped} dogs scraped, below the {HEALTH_MIN_SAMPLE} needed "
-            "to judge completeness. Skipping the check."
-        )
-        print("\n".join(lines))
-        return problems
-
-    for field, limit in FIELD_BLANK_LIMITS.items():
-        count = blank.get(field, 0)
-        rate = count / scraped
-        status = "ok"
-        if rate > limit:
-            status = "FAIL"
-            problems.append(
-                f"{field}: {rate:.0%} blank ({count}/{scraped}), limit {limit:.0%}"
-            )
-        lines.append(
-            f"  {field:<18} {count:>5}/{scraped} blank  {rate:>6.1%}  "
-            f"(limit {limit:.0%})  {status}"
-        )
-
-    if attempted:
-        skip_rate = skipped / attempted
-        status = "ok"
-        if skip_rate > SKIP_RATE_LIMIT:
-            status = "FAIL"
-            problems.append(
-                f"skipped: {skip_rate:.0%} of dogs ({skipped}/{attempted}), "
-                f"limit {SKIP_RATE_LIMIT:.0%}"
-            )
-        lines.append(
-            f"  {'(skipped dogs)':<18} {skipped:>5}/{attempted} failed  "
-            f"{skip_rate:>6.1%}  (limit {SKIP_RATE_LIMIT:.0%})  {status}"
-        )
-
-    if problems:
-        lines.append("")
-        lines.append("The checks below are outside their limits. The usual")
-        lines.append("cause is a changed selector or a renamed label on the")
-        lines.append("source page. Everything scraped is already saved, so")
-        lines.append("this run failed only to raise the alert.")
-        for problem in problems:
-            lines.append(f"  - {problem}")
-
-    report = "\n".join(lines)
-    print(report)
-
-    # Surface the same table on the Actions run page, not only in the log.
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        try:
-            with open(summary_path, "a", encoding="utf-8") as handle:
-                handle.write(f"```\n{report}\n```\n")
-        except OSError as e:
-            print(f"[WARN] could not write step summary: {e}")
-
-    return problems
-
-"""
------  Main Scraper  -----
-"""
-
-def scrape_to_db():
-    # Database Connection (made for github actions)
-    load_dotenv()
-    supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_KEY")
-
-    if not supabase_url:
-        raise EnvironmentError("SUPABASE_URL environment variable not set. Please check your GitHub Actions secrets.")
-    if not supabase_key:
-        raise EnvironmentError("SUPABASE_KEY environment variable not set. Please check your GitHub Actions secrets.")
-
-    supabase: Client = create_client(supabase_url, supabase_key)
-
-    print("Scraping all dog ids...")
-    dog_ids = scrape_dog_ids()
-
-    if not dog_ids:
-        raise RuntimeError("scrape_dog_ids() failed or returned no ids.")
-
-    print("Dog ID scraping complete ✅")
-    print("Scraping each dog's data and updating db...")
-
-    counter = 0
-    skipped = 0
-    blank = {field: 0 for field in FIELD_BLANK_LIMITS}
-
-    for id in dog_ids:
-        print(f"Dog id: {id}")
-
-        try:
-            result = scrape_dog(id)
-            if result is None:
-                skipped += 1
-                print(f"[SKIP] scrape_dog failed for id={id}")
-                continue
-
-            dog, shelter = result
-
-            if not dog.get("shelter_given_id"):
-                skipped += 1
-                print(f"[SKIP] missing shelter_given_id for id={id}")
-                continue
-
-            update_db(supabase, dog, shelter)
-            counter += 1
-
-            # Tally completeness after the write, so the check never gates
-            # saving. A degraded run still refreshes the site.
-            for field in blank:
-                if is_blank(dog.get(field)):
-                    blank[field] += 1
-
-            if counter % 20 == 0:
-                print(f"Scraped {counter} pets so far. (skipped={skipped})")
-
-        except Exception as e:
-            skipped += 1
-            print(f"[SKIP] id={id} crashed: {type(e).__name__}: {e}")
-            continue
-
-    print(f"\nScraped {counter} pets total. Skipped {skipped}.\n")
-
-    return {"scraped": counter, "skipped": skipped, "blank": blank}
-
-"""
------  Execution / Test  -----
-"""
-
-if __name__ == '__main__':
-    start = time.time()
-    stats = scrape_to_db()
-    end = time.time()
-    print("\nScraping Complete!")
-    print(f"Duration: {(end - start) / 60:.0f} minutes.\n")
-
-    # Everything scraped is already in the database. Exiting non-zero here only
-    # fails the Actions run so the notification email goes out.
-    problems = check_field_health(stats)
-    if problems:
-        print(f"\nFailing the run: {len(problems)} field(s) look broken.")
-        sys.exit(1)
-
-
-
-
-
-
-
-
-
-
