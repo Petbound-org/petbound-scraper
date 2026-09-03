@@ -280,12 +280,6 @@ def _normalize(value, mapping):
     key = re.sub(r'\s+', ' ', value).strip().lower()
     return mapping.get(key, key.title())
 
-
-
-
-
-
-
 """
 -----  Tests  -----
 """
@@ -322,11 +316,8 @@ def test_db_read(supabase: Client):
 def test_scrape_dog():
     # 1758257073360 - Nacie
     # 1761092968039 - Peabody
-    # 1785642130505 - Mj. Awkward description: instead of prose it is a list of
-    #                 "Label: value" lines separated only by <br>, so any text
-    #                 extraction that does not insert a separator runs them
-    #                 together ("Name: MjAnimal ID: A5789876Location: ...").
-    dog_ids = [1758257073360, 1785642130505]
+    # 1785642130505 - Mj (strange description)
+    dog_ids = [1758257073360, 1785642130505, 1785642130505]
 
     for dog_id in dog_ids:
         result = scrape_dog(dog_id)
