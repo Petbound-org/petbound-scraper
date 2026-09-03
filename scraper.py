@@ -1,6 +1,5 @@
 # scraper.py
 
-# imports
 import os
 import requests
 import sys
@@ -11,6 +10,8 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from schemas import Dog, Shelter
 
 # CSV file locations
 PET_CSV = "pet_data.csv"
@@ -28,7 +29,7 @@ SHELTER_FIELDS = [
 ]
 
 """
------  Scrape Methods  -----
+-----  Scrape All Dog IDs  -----
 """
 
 def scrape_dog_ids():
@@ -82,58 +83,74 @@ def scrape_dog_ids():
 
     return sorted(list(dog_ids))
 
+"""
+-----  Scrape Dog Info Given ID  -----
+"""
+
+def _get_description_div(page):
+    """ Helper to find description div on a dog page. """
+    avoid_labels = {'Breed', 'Profile'}
+
+    # Should be 2 matches for the find all
+    for div in page.find_all('div', style=re.compile(r'font-size:\s*1\.2em')):
+        # A div's <strong> tags are its field labels, e.g. <strong>Breed:</strong>
+        labels = {}
+        for partition in div.find_all('strong'):
+            text = partition.get_text().strip().rstrip(":")
+            labels.add(text)
+
+        # overlap signals that this is the wrong block
+        if labels & avoid_labels:
+            continue
+
+        return div
+
+
 def scrape_dog(id):
     """
     Scrapes the data of a dog given its ID.
     Each dog's page: https://www.dogsindanger.com/dog/<ID>
     """
     url = f"https://www.dogsindanger.com/dog/{id}"
+    response = requests.get(url)
+    
+    # time.sleep(0.5) # *** UNCOMMENT AS A POSSIBLE FIX FOR UNEXPECTED ERRORS ***
 
-    # USE SESSION + headers + timeout (so retries apply)
-    try:
-        response = SESSION.get(url, headers=HEADERS, timeout=20)
+    # Connection check (CRITICAL ERROR IF IT FAILS)
+    try: 
         response.raise_for_status()
     except requests.exceptions.HTTPError as e:
-        print(f"[HTTP ERROR] dog_id={id} url={url} -> {e}")
+        print(f"HTTP ERROR: {e}")
         return None
     except requests.exceptions.RequestException as e:
-        print(f"[NETWORK ERROR] dog_id={id} url={url} -> {e}")
+        print(f"NON-HTTP ERROR (like a network issue): {e}")
         return None
 
     soup = BeautifulSoup(response.text, 'lxml')
     container = soup.find('div', attrs={'id': 'doggie'})
 
-    # If the page structure is not what we expect, skip
+    # Edge case: no dog details at all
     if not container:
         print(f"[PARSE ERROR] dog_id={id} url={url} -> missing #doggie container")
         return None
 
-    dog = {}
-    shelter = {}
+    dog = Dog()
+    shelter = Shelter()
 
     # Dog name
-    name_div = find_by_style(container, r'font-size:\s*24pt')
-    dog['name'] = name_div.get_text(strip=True).title() if name_div else ""
+    name_div = container.find('div', style=re.compile(r'font-size:\s*24pt'))
+    if name_div:
+        dog.name = name_div.get_text(strip=True).title()
 
     # Dog image
     img = container.find('img', attrs={'id': 'mainImageX'})
     dog['image_urls'] = [img.get('src')] if (img and img.get('src')) else []
 
-    # Dog description. The block is <br>-separated lines, so take every direct
-    # text node rather than only the first: shelters that list one field per
-    # line (microchip, sex, colour, intake date) were being reduced to their
-    # opening line, e.g. 34 characters kept out of 381. Stays non-recursive so
-    # nested markup does not leak in.
-    description_div = find_description_div(container)
+    # Dog description. recursive=False keeps nested markup out.
+    description_div = _get_description_div(container)
     if description_div:
-        parts = [
-            t.strip()
-            for t in description_div.find_all(string=True, recursive=False)
-            if t.strip()
-        ]
-        dog['description'] = "\n".join(parts).lstrip(': ').strip()
-    else:
-        dog['description'] = ""
+        parts = [t.strip() for t in description_div.find_all(string=True, recursive=False) if t.strip()]
+        dog.description = "\n".join(parts).lstrip(': ').strip()
 
     # Euthanasia date + reason (defensive, label-based)
     # The div reads: "At Risk To Be Killed: [TODAY! ]<date> Reason: <reason>"
@@ -237,6 +254,16 @@ def scrape_dog(id):
 
     return dog, shelter
 
+
+
+
+
+
+
+
+
+
+
 """
 -----  Tests  -----
 """
@@ -316,28 +343,8 @@ def update_db(supabase: Client, dog, shelter):
     else:
         supabase.table('pets').insert(dog).execute()
 
-def update_csv():
-    pass
-
 """
 -----  Post-scrape health check  -----
-
-The scrape itself stays quiet: a dog that fails to parse is skipped and the run
-carries on, so a partial outage still refreshes most of the site rather than
-leaving it stale. The cost of that is silence, and silence is how the August
-2026 breakage went unnoticed for five weeks. dogsindanger.com had appended
-properties to an inline style attribute, the exact-match selectors stopped
-matching, and name / age / gender / size / description were written as empty
-strings on every new record while the run kept reporting success.
-
-So completeness is measured across the whole run and checked once at the end,
-after every record is already saved. If a field is blank far more often than it
-should be, the process exits non-zero. Nothing is rolled back; the only effect is
-a failed GitHub Actions run, which sends the notification email.
-
-Limits are the share of scraped dogs allowed to have a blank value. They sit well
-above normal noise so ordinary gaps stay quiet, and well below a real breakage
-(a broken selector yields ~100%).
 """
 
 FIELD_BLANK_LIMITS = {
@@ -442,7 +449,6 @@ def check_field_health(stats):
 
     return problems
 
-
 """
 -----  Main Scraper  -----
 """
@@ -510,7 +516,6 @@ def scrape_to_db():
     print(f"\nScraped {counter} pets total. Skipped {skipped}.\n")
 
     return {"scraped": counter, "skipped": skipped, "blank": blank}
-
 
 """
 -----  Execution / Test  -----
