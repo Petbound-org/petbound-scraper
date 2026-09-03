@@ -76,4 +76,7 @@ if __name__ == "__main__":
     # Fail here so that GitHub actions fails and sends me an email about issues
     problems = check_field_health(stats)
     if problems:
+        print("Too many blank fields, usually a selector that stopped matching:")
+        for problem in problems:
+            print(f"  - {problem}")
         sys.exit(1)
