@@ -28,6 +28,26 @@ SHELTER_FIELDS = [
     'phone_number', 'email'
 ]
 
+# Conversion from website text to cleaner versions
+SIZE_TEXT_CONVERSION = {
+    "small": "Small",
+    "medium": "Medium",
+    "large": "Large",
+    "x-large": "X-Large",
+    "xlarge": "X-Large",
+    "extra large": "X-Large",
+}
+AGE_TEXT_CONVERSION = {
+    "under 6 months": "Under 6 months",
+    "young adult": "Young adult",
+    "adult": "Adult",
+    "senior": "Senior",
+}
+GENDER_TEXT_CONVERSION = {
+    "male": "Male",
+    "female": "Female",
+}
+
 """
 -----  Scrape All Dog IDs  -----
 """
@@ -118,123 +138,50 @@ def scrape_dog(id):
     dog = Dog()
     shelter = Shelter()
 
-    # Dog name
+    # Name
     name_div = container.find('div', style=re.compile(r'font-size:\s*24pt'))
     if name_div:
         dog.name = name_div.get_text(strip=True).title()
 
-    # Dog image
+    # Image
     img = container.find('img', attrs={'id': 'mainImageX'})
     dog.image_urls = [img.get('src')] if (img and img.get('src')) else []
 
-    # Dog description. recursive=False keeps nested markup out.
+    # Description 
     description_div = _get_description_div(container)
     if description_div:
-        dog.description = description_div.get_text("\n", strip=True).lstrip(':').strip()
+        parts = []
+        for text_node in description_div.find_all(string=True, recursive=False):
+            text = text_node.strip()
+            if text:
+                parts.append(text)
+
+        description = "\n".join(parts)
+
+        dog.description = description.lstrip(":").strip()
 
 
-    # REST IS UNCLEAN
+    # Euthanasia date + reason
+    dog.euthanasia_date, dog.euthanasia_reason = _parse_euthanasia_info(container)
 
+    # Breed
+    dog.breed = _get_labelled_value(container, 'Breed:')
 
-    # Euthanasia date + reason (defensive, label-based)
-    # The div reads: "At Risk To Be Killed: [TODAY! ]<date> Reason: <reason>"
-    dog['euthanasia_date'] = ""
-    dog['euthanasia_reason'] = ""
-    # Still matching today, but hardened for the same reason as the others: the
-    # whole pipeline is worthless without a date.
-    euthanasia_div = find_by_style(container, r'font-size:\s*10pt')
-    if euthanasia_div:
-        full = euthanasia_div.get_text(" ", strip=True)
+    # Shelter's dog ID
+    dog.shelter_given_id = (
+        _get_labelled_value(container, 'Dog ID:')
+        or _get_labelled_value(container, 'Shelter dog ID:')
+    )
 
-        # reason: everything after "Reason:"; strip it off before parsing date
-        reason_m = re.search(r'Reason:\s*(.*)$', full)
-        if reason_m:
-            dog['euthanasia_reason'] = reason_m.group(1).strip()
-            full = full[:reason_m.start()]
+    # Size + age + gender
+    dog.size, dog.age, dog.gender = _parse_profile(container)
 
-        # date: what's left after removing the label and optional "TODAY!"
-        full = re.sub(r'^\s*At Risk To Be Killed:\s*', '', full)
-        full = re.sub(r'^\s*TODAY!\s*', '', full)
-        dog['euthanasia_date'] = full.strip()
+    # Shelter name + street + city + state
+    shelter.name, shelter.address, shelter.city, shelter.state = _parse_shelter_location(container)
 
-    # Raw text parsing
-    text = container.get_text(strip=True, separator="\n")
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    i = 0
-    n = len(lines)
-
-    email_re = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
-    phone_re = re.compile(r"(\+?1[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}")
-
-    while i < n:
-        if lines[i] == 'Breed:' and i+1 < n:
-            dog['breed'] = lines[i+1]; i += 2; continue
-
-        # Age / gender / size no longer have their own labels — they live in the
-        # "Profile:" block, parsed separately below via parse_profile().
-
-        if lines[i] == 'Shelter Information:' and i+3 < n:
-            shelter['name'] = lines[i+1]
-            shelter['address'] = lines[i+2]
-
-            city_state = lines[i+3]
-            # defensive parse
-            if len(city_state) >= 2:
-                shelter['state'] = city_state[-2:]
-                shelter['city'] = city_state[:-4] if len(city_state) > 4 else ""
-            else:
-                shelter['city'] = ""
-                shelter['state'] = ""
-
-            i += 4
-            continue
-
-        # Site renamed this label from 'Shelter dog ID:' to 'Dog ID:'.
-        if lines[i] in ('Dog ID:', 'Shelter dog ID:') and i+1 < n:
-            dog['shelter_given_id'] = lines[i+1]
-            i += 2
-            continue
-
-        # NEW: no fixed offsets — scan forward for phone/email
-        if lines[i] == 'Contact:':
-            found_phone = ""
-            found_email = ""
-            j = i
-
-            while j < n and (not found_phone or not found_email):
-                if not found_email:
-                    m = email_re.search(lines[j])
-                    if m:
-                        found_email = m.group(0)
-
-                if not found_phone:
-                    m = phone_re.search(lines[j])
-                    if m:
-                        found_phone = m.group(0)
-
-                j += 1
-
-            shelter['phone_number'] = found_phone
-            shelter['email'] = found_email
-            i = j
-            continue
-
-        i += 1
-
-    # Age / size / gender come from the free-text "Profile:" block.
-    p_size, p_age, p_gender = parse_profile(container)
-    if p_size:
-        dog['size'] = p_size
-    if p_age:
-        dog['age'] = p_age
-    if p_gender:
-        dog['gender'] = p_gender
-
-    # Ensure keys exist (prevents KeyError later)
-    for k in ['breed', 'age', 'gender', 'size', 'shelter_given_id']:
-        dog.setdefault(k, "")
-    for k in ['name', 'address', 'city', 'state', 'phone_number', 'email']:
-        shelter.setdefault(k, "")
+    # Shelter contact info
+    shelter.phone_number = _get_labelled_value(container, 'Phone:')
+    shelter.email = _get_labelled_value(container, 'email:')
 
     return dog, shelter
 
@@ -258,6 +205,80 @@ def _get_description_div(page):
             continue
 
         return div
+
+def _find_label(page, label):
+    """ Finds labels. Assumes they're wrapped in strong tags. """
+    return page.find('strong', string=re.compile(rf'^\s*{re.escape(label)}\s*$'))
+
+def _get_labelled_value(page, label):
+    """ Gets the text following a label """
+    strong = _find_label(page, label)
+    if not strong:
+        return ""
+
+    text = strong.parent.get_text("\n", strip=True)
+    return text.removeprefix(label).strip()
+
+def _parse_shelter_location(page):
+    """ Parses the "Shelter Information" block to find name, address, city, state. """
+    strong = _find_label(page, 'Shelter Information:')
+    if not strong:
+        return "", "", "", ""
+
+    block = strong.find_next_sibling('div')
+    if not block:
+        return "", "", "", ""
+
+    lines = block.get_text("\n", strip=True).split("\n")
+    name = lines[0] if len(lines) > 0 else ""
+    address = lines[1] if len(lines) > 1 else ""
+    city_state = lines[2] if len(lines) > 2 else ""
+
+    city, _, state = city_state.rpartition(',')
+
+    return name, address, city.strip(), state.strip()
+
+def _parse_euthanasia_info(page):
+    """ Parses the "At Risk To Be Killed:" banner to find euthanasia date + reason. """
+    div = page.find('div', style=re.compile(r'font-size:\s*10pt'))
+    if not div:
+        return "", ""
+
+    text = re.sub(r'\s+', ' ', div.get_text(" ", strip=True)).strip()
+
+    match = re.search(r'At Risk To Be Killed:\s*(?:TODAY!\s*)?(.*?)\s*(?:Reason:\s*(.*))?$', text)
+    if not match:
+        return "", ""
+
+    return match.group(1).strip(), (match.group(2) or "").strip()
+
+def _parse_profile(page):
+    """ Parses the "Profile" block to find age, breed, and gender. """
+    text = _get_labelled_value(page, 'Profile:')
+    if not text:
+        return "", "", ""
+
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    descriptor = lines[0] if len(lines) > 0 else ""
+    gender = lines[1] if len(lines) > 1 else ""
+
+    match = re.match(r'(?i)^(.*?)\s+size\s+(.+)$', descriptor)
+    size = match.group(1) if match else ""
+    age = match.group(2) if match else ""
+
+    return (
+        _normalize(size, SIZE_TEXT_CONVERSION),
+        _normalize(age, AGE_TEXT_CONVERSION),
+        _normalize(gender, GENDER_TEXT_CONVERSION),
+    )
+
+def _normalize(value, mapping):
+    """ Reformats to camelcase """
+    if not value:
+        return ""
+
+    key = re.sub(r'\s+', ' ', value).strip().lower()
+    return mapping.get(key, key.title())
 
 
 
@@ -299,12 +320,24 @@ def test_db_read(supabase: Client):
     print(test_shelter)
 
 def test_scrape_dog():
-    # 1758257073360 - Nacie 
+    # 1758257073360 - Nacie
     # 1761092968039 - Peabody
-    dog, shelter = scrape_dog(1758257073360) 
+    # 1785642130505 - Mj. Awkward description: instead of prose it is a list of
+    #                 "Label: value" lines separated only by <br>, so any text
+    #                 extraction that does not insert a separator runs them
+    #                 together ("Name: MjAnimal ID: A5789876Location: ...").
+    dog_ids = [1758257073360, 1785642130505]
 
-    print(f"\nDog: {dog}\n")
-    print(f"Shelter: {shelter}\n")
+    for dog_id in dog_ids:
+        result = scrape_dog(dog_id)
+        if result is None:
+            print(f"\n[FAIL] scrape_dog({dog_id}) returned None\n")
+            continue
+
+        dog, shelter = result
+        print(f"\n----- {dog_id} -----")
+        print(f"Dog: {dog}\n")
+        print(f"Shelter: {shelter}\n")
 
 """
 -----  Database or CSV Data Storage  -----
@@ -545,23 +578,3 @@ if __name__ == '__main__':
 
 
 
-# SIZE_MAP = {
-#     "small": "Small",
-#     "medium": "Medium",
-#     "large": "Large",
-#     "x-large": "X-Large",
-#     "xlarge": "X-Large",
-#     "extra large": "X-Large",
-# }
-
-# AGE_MAP = {
-#     "under 6 months": "Under 6 months",
-#     "young adult": "Young adult",
-#     "adult": "Adult",
-#     "senior": "Senior",
-# }
-
-# GENDER_MAP = {
-#     "male": "Male",
-#     "female": "Female",
-# }
