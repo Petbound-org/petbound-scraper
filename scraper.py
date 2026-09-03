@@ -87,25 +87,6 @@ def scrape_dog_ids():
 -----  Scrape Dog Info Given ID  -----
 """
 
-def _get_description_div(page):
-    """ Helper to find description div on a dog page. """
-    avoid_labels = {'Breed', 'Profile'}
-
-    # Should be 2 matches for the find all
-    for div in page.find_all('div', style=re.compile(r'font-size:\s*1\.2em')):
-        # A div's <strong> tags are its field labels, e.g. <strong>Breed:</strong>
-        labels = {}
-        for partition in div.find_all('strong'):
-            text = partition.get_text().strip().rstrip(":")
-            labels.add(text)
-
-        # overlap signals that this is the wrong block
-        if labels & avoid_labels:
-            continue
-
-        return div
-
-
 def scrape_dog(id):
     """
     Scrapes the data of a dog given its ID.
@@ -144,13 +125,16 @@ def scrape_dog(id):
 
     # Dog image
     img = container.find('img', attrs={'id': 'mainImageX'})
-    dog['image_urls'] = [img.get('src')] if (img and img.get('src')) else []
+    dog.image_urls = [img.get('src')] if (img and img.get('src')) else []
 
     # Dog description. recursive=False keeps nested markup out.
     description_div = _get_description_div(container)
     if description_div:
-        parts = [t.strip() for t in description_div.find_all(string=True, recursive=False) if t.strip()]
-        dog.description = "\n".join(parts).lstrip(': ').strip()
+        dog.description = description_div.get_text("\n", strip=True).lstrip(':').strip()
+
+
+    # REST IS UNCLEAN
+
 
     # Euthanasia date + reason (defensive, label-based)
     # The div reads: "At Risk To Be Killed: [TODAY! ]<date> Reason: <reason>"
@@ -254,9 +238,26 @@ def scrape_dog(id):
 
     return dog, shelter
 
+"""
+-----  Helpers  -----
+"""
 
+def _get_description_div(page):
+    """ Helper to find description div on a dog page. """
+    avoid_labels = {'Breed', 'Profile'}
 
+    # Should be 2 matches for the find all
+    for div in page.find_all('div', style=re.compile(r'font-size:\s*1\.2em')):
+        labels = set()
+        for partition in div.find_all('strong'):
+            text = partition.get_text().strip().rstrip(":")
+            labels.add(text)
 
+        # overlap signals that this is the wrong block
+        if labels & avoid_labels:
+            continue
+
+        return div
 
 
 
